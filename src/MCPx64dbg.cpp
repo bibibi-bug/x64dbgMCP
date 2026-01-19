@@ -72,8 +72,14 @@
 #define DEFAULT_PORT 8888
 #define MAX_REQUEST_SIZE 8192
 
+// Menu IDs
+#define MENU_START_SERVER   1
+#define MENU_STOP_SERVER    2
+#define MENU_RESTART_SERVER 3
+
 // Global variables
 int g_pluginHandle;
+int g_menuHandle;
 HANDLE g_httpServerThread = NULL;
 bool g_httpServerRunning = false;
 int g_httpPort = DEFAULT_PORT;
@@ -94,6 +100,8 @@ std::string urlDecode(const std::string& str);
 bool cbEnableHttpServer(int argc, char* argv[]);
 bool cbSetHttpPort(int argc, char* argv[]);
 void registerCommands();
+void cbMenuEntry(CBTYPE cbType, void* callbackInfo);
+void restartHttpServer();
 
 //=============================================================================
 // Plugin Interface Implementation
@@ -105,19 +113,22 @@ bool pluginInit(PLUG_INITSTRUCT* initStruct) {
     initStruct->sdkVersion = PLUG_SDKVERSION;
     strncpy_s(initStruct->pluginName, PLUGIN_NAME, _TRUNCATE);
     g_pluginHandle = initStruct->pluginHandle;
-    
+
     _plugin_logputs("x64dbg HTTP Server plugin loading...");
-    
+
     // Register commands
     registerCommands();
-    
+
+    // Register menu callback
+    _plugin_registercallback(g_pluginHandle, CB_MENUENTRY, cbMenuEntry);
+
     // Start the HTTP server
     if (startHttpServer()) {
         _plugin_logprintf("x64dbg HTTP Server started on port %d\n", g_httpPort);
     } else {
         _plugin_logputs("Failed to start HTTP server!");
     }
-    
+
     _plugin_logputs("x64dbg HTTP Server plugin loaded!");
     return true;
 }
@@ -130,7 +141,13 @@ void pluginStop() {
 }
 
 // Plugin setup
-bool pluginSetup() {
+bool pluginSetup(PLUG_SETUPSTRUCT* setupStruct) {
+    g_menuHandle = setupStruct->hMenu;
+
+    _plugin_menuaddentry(g_menuHandle, MENU_START_SERVER, "Start MCP Server");
+    _plugin_menuaddentry(g_menuHandle, MENU_STOP_SERVER, "Stop MCP Server");
+    _plugin_menuaddentry(g_menuHandle, MENU_RESTART_SERVER, "Restart MCP Server");
+
     return true;
 }
 
@@ -144,7 +161,48 @@ extern "C" __declspec(dllexport) void plugstop() {
 }
 
 extern "C" __declspec(dllexport) void plugsetup(PLUG_SETUPSTRUCT* setupStruct) {
-    pluginSetup();
+    pluginSetup(setupStruct);
+}
+
+// Restart HTTP server
+void restartHttpServer() {
+    _plugin_logputs("Restarting MCP HTTP server...");
+    stopHttpServer();
+    Sleep(100);
+    if (startHttpServer()) {
+        _plugin_logprintf("MCP HTTP server restarted on port %d\n", g_httpPort);
+    } else {
+        _plugin_logputs("Failed to restart MCP HTTP server");
+    }
+}
+
+// Menu callback
+void cbMenuEntry(CBTYPE cbType, void* callbackInfo) {
+    PLUG_CB_MENUENTRY* info = (PLUG_CB_MENUENTRY*)callbackInfo;
+    switch (info->hEntry) {
+        case MENU_START_SERVER:
+            if (!g_httpServerRunning) {
+                if (startHttpServer()) {
+                    _plugin_logprintf("MCP HTTP server started on port %d\n", g_httpPort);
+                } else {
+                    _plugin_logputs("Failed to start MCP HTTP server");
+                }
+            } else {
+                _plugin_logputs("MCP HTTP server is already running");
+            }
+            break;
+        case MENU_STOP_SERVER:
+            if (g_httpServerRunning) {
+                stopHttpServer();
+                _plugin_logputs("MCP HTTP server stopped");
+            } else {
+                _plugin_logputs("MCP HTTP server is not running");
+            }
+            break;
+        case MENU_RESTART_SERVER:
+            restartHttpServer();
+            break;
+    }
 }
 
 //=============================================================================
