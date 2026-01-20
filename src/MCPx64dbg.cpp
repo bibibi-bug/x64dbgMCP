@@ -113,9 +113,9 @@ bool pluginInit(PLUG_INITSTRUCT* initStruct) {
     initStruct->sdkVersion = PLUG_SDKVERSION;
     strncpy_s(initStruct->pluginName, PLUGIN_NAME, _TRUNCATE);
     g_pluginHandle = initStruct->pluginHandle;
-
+    
     _plugin_logputs("x64dbg HTTP Server plugin loading...");
-
+    
     // Register commands
     registerCommands();
 
@@ -128,7 +128,7 @@ bool pluginInit(PLUG_INITSTRUCT* initStruct) {
     } else {
         _plugin_logputs("Failed to start HTTP server!");
     }
-
+    
     _plugin_logputs("x64dbg HTTP Server plugin loaded!");
     return true;
 }
@@ -208,6 +208,38 @@ void cbMenuEntry(CBTYPE cbType, void* callbackInfo) {
 //=============================================================================
 // HTTP Server Implementation
 //=============================================================================
+
+// Wait for log file creation to avoid race conditions
+static void waitForLogFile(const std::string& path, DWORD maxWaitMs, DWORD retryDelayMs) {
+    DWORD start = GetTickCount();
+    while (GetTickCount() - start < maxWaitMs) {
+        DWORD attrs = GetFileAttributesA(path.c_str());
+        if (attrs != INVALID_FILE_ATTRIBUTES) {
+            return;
+        }
+        Sleep(retryDelayMs);
+    }
+}
+
+// Read log file with retry mechanism
+static std::string readLogFileWithRetry(const std::string& path, DWORD maxWaitMs, DWORD retryDelayMs) {
+    DWORD start = GetTickCount();
+    while (GetTickCount() - start < maxWaitMs) {
+        std::ifstream file(path, std::ios::binary);
+        if (file.is_open()) {
+            file.seekg(0, std::ios::end);
+            std::streamsize fileSize = file.tellg();
+            if (fileSize > 0) {
+                file.seekg(0, std::ios::beg);
+                std::stringstream buffer;
+                buffer << file.rdbuf();
+                return buffer.str();
+            }
+        }
+        Sleep(retryDelayMs);
+    }
+    return std::string();
+}
 
 // Start the HTTP server
 bool startHttpServer() {
@@ -336,7 +368,7 @@ DWORD WINAPI HttpServerThread(LPVOID lpParam) {
                 _plugin_logprintf("Accept failed with error: %d\n", WSAGetLastError());
             }
             
-            Sleep(100); // Avoid tight loop
+            Sleep(10); // Avoid tight loop (reduced from 100ms)
             continue;
         }
         
@@ -375,60 +407,21 @@ DWORD WINAPI HttpServerThread(LPVOID lpParam) {
                     // Start log redirection
                     std::string redirectCmd = "LogRedirect \"" + logFile + "\"";
                     DbgCmdExecDirect(redirectCmd.c_str());
-                    
-                    // Small delay to ensure redirection is active
-                    Sleep(50);
-                    
+
+                    // Wait for log file to be created
+                    waitForLogFile(logFile, 50, 5);
+
                     // Clear any existing content in the log
                     DbgCmdExecDirect("LogClear");
-                    
-                    // Small delay after clearing
-                    Sleep(50);
-                    
+
                     // Execute the actual command
                     bool success = DbgCmdExecDirect(cmd.c_str());
-                    
-                    // Wait for command to complete and output to be written
-                    Sleep(200);
-                    
+
                     // Stop log redirection
                     DbgCmdExecDirect("LogRedirectStop");
-                    
-                    // Wait a bit more for file operations to complete
-                    Sleep(100);
-                    
+
                     // Read the captured output with retry mechanism
-                    std::string output;
-                    int retryCount = 0;
-                    const int maxRetries = 5;
-                    
-                    while (retryCount < maxRetries) {
-                        std::ifstream file(logFile, std::ios::binary);
-                        if (file.is_open()) {
-                            // Get file size
-                            file.seekg(0, std::ios::end);
-                            std::streamsize fileSize = file.tellg();
-                            file.seekg(0, std::ios::beg);
-                            
-                            if (fileSize > 0) {
-                                // Read the entire file
-                                std::stringstream buffer;
-                                buffer << file.rdbuf();
-                                output = buffer.str();
-                                file.close();
-                                break;
-                            } else {
-                                file.close();
-                                // File exists but is empty, wait and retry
-                                Sleep(100);
-                                retryCount++;
-                            }
-                        } else {
-                            // File doesn't exist yet, wait and retry
-                            Sleep(100);
-                            retryCount++;
-                        }
-                    }
+                    std::string output = readLogFileWithRetry(logFile, 100, 10);
                     
                     // Clean up temporary file
                     DeleteFileA(logFile.c_str());

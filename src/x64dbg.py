@@ -6,7 +6,6 @@ import warnings
 from typing import Any, Dict, List, Callable, Union, Optional
 import requests
 from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
 
 from mcp.server.fastmcp import FastMCP
 
@@ -17,19 +16,19 @@ TIMEOUT_FAST = 5        # Simple queries (register read, flag check)
 TIMEOUT_NORMAL = 30     # Normal operations (memory read, disassembly)
 TIMEOUT_DEBUG = 120     # Debug control operations (run, step, breakpoint hit)
 
+# Retry configuration for timeout errors
+MAX_TIMEOUT_RETRIES = 2
+RETRY_DELAY = 0.5
+RETRY_STATUS_CODES = {500, 502, 503, 504}
+
 # Connection pool configuration
 _http_session: Optional[requests.Session] = None
 
 def _create_session() -> requests.Session:
-    """Create HTTP session with connection pooling and retry logic"""
+    """Create HTTP session with connection pooling (retry handled manually in safe_get/safe_post)"""
     session = requests.Session()
-    retry_strategy = Retry(
-        total=3,
-        backoff_factor=0.5,
-        status_forcelist=[500, 502, 503, 504],
-    )
     adapter = HTTPAdapter(
-        max_retries=retry_strategy,
+        max_retries=0,
         pool_connections=10,
         pool_maxsize=10
     )
@@ -48,6 +47,7 @@ def _get_session() -> requests.Session:
 # INPUT VALIDATION
 # =============================================================================
 
+import time
 import re
 
 def _validate_hex_address(addr: str) -> bool:
@@ -122,55 +122,84 @@ def set_x64dbg_server_url(url: str) -> None:
 
 mcp = FastMCP("x64dbg-mcp")
 
-def safe_get(endpoint: str, params: dict = None, timeout: int = TIMEOUT_NORMAL):
+def safe_get(endpoint: str, params: dict = None, timeout: int = TIMEOUT_NORMAL, retries: int = MAX_TIMEOUT_RETRIES):
     """
     Perform a GET request with optional query parameters.
     Returns parsed JSON if possible, otherwise text content.
-    Uses connection pooling for better performance.
+    Uses connection pooling and automatic retry on timeout and 5xx errors.
     """
     if params is None:
         params = {}
 
     url = f"{x64dbg_server_url}{endpoint}"
 
-    try:
-        response = _get_session().get(url, params=params, timeout=timeout)
-        response.encoding = 'utf-8'
-        if response.ok:
-            try:
-                return response.json()
-            except ValueError:
-                return response.text.strip()
-        else:
-            return f"Error {response.status_code}: {response.text.strip()}"
-    except Exception as e:
-        return f"Request failed: {str(e)}"
+    for attempt in range(retries + 1):
+        try:
+            response = _get_session().get(url, params=params, timeout=timeout)
+            response.encoding = 'utf-8'
+            # Retry on transient 5xx errors
+            if response.status_code in RETRY_STATUS_CODES and attempt < retries:
+                time.sleep(RETRY_DELAY)
+                continue
+            if response.ok:
+                try:
+                    return response.json()
+                except ValueError:
+                    return response.text.strip()
+            else:
+                return f"Error {response.status_code}: {response.text.strip()}"
+        except requests.exceptions.Timeout:
+            if attempt < retries:
+                time.sleep(RETRY_DELAY)
+                continue
+            return {"error": f"Request timed out after {retries + 1} attempts", "endpoint": endpoint}
+        except requests.exceptions.ConnectionError:
+            if attempt < retries:
+                time.sleep(RETRY_DELAY * 2)
+                continue
+            return {"error": "Connection failed - MCP server may be down", "endpoint": endpoint}
+        except Exception as e:
+            return {"error": f"Request failed: {str(e)}", "endpoint": endpoint}
 
-def safe_post(endpoint: str, data: Union[dict, str], timeout: int = TIMEOUT_NORMAL):
+def safe_post(endpoint: str, data: Union[dict, str], timeout: int = TIMEOUT_NORMAL, retries: int = MAX_TIMEOUT_RETRIES):
     """
     Perform a POST request with data.
     Returns parsed JSON if possible, otherwise text content.
-    Uses connection pooling for better performance.
+    Uses connection pooling and automatic retry on timeout and 5xx errors.
     """
-    try:
-        url = f"{x64dbg_server_url}{endpoint}"
-        if isinstance(data, dict):
-            response = _get_session().post(url, data=data, timeout=timeout)
-        else:
-            response = _get_session().post(url, data=data.encode("utf-8"), timeout=timeout)
-        
-        response.encoding = 'utf-8'
-        
-        if response.ok:
-            # Try to parse as JSON first
-            try:
-                return response.json()
-            except ValueError:
-                return response.text.strip()
-        else:
-            return f"Error {response.status_code}: {response.text.strip()}"
-    except Exception as e:
-        return f"Request failed: {str(e)}"
+    url = f"{x64dbg_server_url}{endpoint}"
+
+    for attempt in range(retries + 1):
+        try:
+            if isinstance(data, dict):
+                response = _get_session().post(url, data=data, timeout=timeout)
+            else:
+                response = _get_session().post(url, data=data.encode("utf-8"), timeout=timeout)
+
+            response.encoding = 'utf-8'
+            # Retry on transient 5xx errors
+            if response.status_code in RETRY_STATUS_CODES and attempt < retries:
+                time.sleep(RETRY_DELAY)
+                continue
+            if response.ok:
+                try:
+                    return response.json()
+                except ValueError:
+                    return response.text.strip()
+            else:
+                return f"Error {response.status_code}: {response.text.strip()}"
+        except requests.exceptions.Timeout:
+            if attempt < retries:
+                time.sleep(RETRY_DELAY)
+                continue
+            return {"error": f"Request timed out after {retries + 1} attempts", "endpoint": endpoint}
+        except requests.exceptions.ConnectionError:
+            if attempt < retries:
+                time.sleep(RETRY_DELAY * 2)
+                continue
+            return {"error": "Connection failed - MCP server may be down", "endpoint": endpoint}
+        except Exception as e:
+            return {"error": f"Request failed: {str(e)}", "endpoint": endpoint}
 
 # =============================================================================
 # TOOL REGISTRY INTROSPECTION (for CLI/Claude tool-use)
