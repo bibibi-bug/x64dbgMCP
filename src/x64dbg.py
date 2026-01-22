@@ -910,22 +910,20 @@ def StopTraceRecording() -> str:
 # =============================================================================
 
 @mcp.tool()
-def ThreadGetList() -> list:
+def ThreadGetList() -> dict:
     """
     Get list of all threads in debugged process
 
     Returns:
-        List of thread information
+        Dictionary with count, currentThread, and threads list
     """
     result = safe_get("ThreadList")
-    if isinstance(result, list):
-        return result
-    elif isinstance(result, str):
-        try:
-            return json.loads(result)
-        except:
-            return [{"error": "Failed to parse thread list", "raw": result}]
-    return [{"error": "Unexpected response format"}]
+    parsed = _parse_response(result, "Failed to parse thread list")
+    if isinstance(parsed, dict) and "threads" in parsed:
+        return parsed
+    elif isinstance(parsed, list):
+        return {"count": len(parsed), "currentThread": -1, "threads": parsed}
+    return {"error": "Unexpected response format", "raw": str(result)}
 
 @mcp.tool()
 def ThreadSwitch(tid: str) -> str:

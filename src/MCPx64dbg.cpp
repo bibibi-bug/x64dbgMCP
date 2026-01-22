@@ -1294,6 +1294,74 @@ DWORD WINAPI HttpServerThread(LPVOID lpParam) {
                         sendHttpResponse(clientSocket, 200, "application/json", jsonResponse.str());
                     }
                 }
+                // Thread List endpoint
+                else if (path == "/ThreadList") {
+                    THREADLIST threadList;
+                    memset(&threadList, 0, sizeof(threadList));
+
+                    // Get thread list using Bridge API (returns void)
+                    DbgGetThreadList(&threadList);
+
+                    if (threadList.count == 0) {
+                        // Free list if allocated but empty
+                        if (threadList.list) {
+                            BridgeFree(threadList.list);
+                        }
+                        sendHttpResponse(clientSocket, 200, "application/json", "{\"count\":0,\"currentThread\":-1,\"threads\":[]}");
+                    }
+                    else if (threadList.list == nullptr) {
+                        sendHttpResponse(clientSocket, 200, "application/json", "{\"count\":0,\"currentThread\":-1,\"threads\":[]}");
+                    }
+                    else {
+                        std::stringstream jsonResponse;
+                        jsonResponse << "{";
+                        jsonResponse << "\"count\":" << threadList.count << ",";
+                        jsonResponse << "\"currentThread\":" << threadList.CurrentThread << ",";
+                        jsonResponse << "\"threads\":[";
+
+                        for (int i = 0; i < threadList.count; i++) {
+                            if (i > 0) jsonResponse << ",";
+
+                            THREADALLINFO& t = threadList.list[i];
+                            jsonResponse << "{";
+                            jsonResponse << "\"threadNumber\":" << t.BasicInfo.ThreadNumber << ",";
+                            jsonResponse << "\"threadId\":" << t.BasicInfo.ThreadId << ",";
+                            jsonResponse << "\"handle\":\"0x" << std::hex << (duint)t.BasicInfo.Handle << std::dec << "\",";
+                            jsonResponse << "\"startAddress\":\"0x" << std::hex << t.BasicInfo.ThreadStartAddress << std::dec << "\",";
+                            jsonResponse << "\"localBase\":\"0x" << std::hex << t.BasicInfo.ThreadLocalBase << std::dec << "\",";
+
+                            // Escape thread name for JSON
+                            std::string threadName = t.BasicInfo.threadName;
+                            std::string escapedName;
+                            for (char c : threadName) {
+                                if (c == '"') escapedName += "\\\"";
+                                else if (c == '\\') escapedName += "\\\\";
+                                else if (c == '\n') escapedName += "\\n";
+                                else if (c == '\r') escapedName += "\\r";
+                                else if (c == '\t') escapedName += "\\t";
+                                else escapedName += c;
+                            }
+                            jsonResponse << "\"name\":\"" << escapedName << "\",";
+
+                            jsonResponse << "\"cip\":\"0x" << std::hex << t.ThreadCip << std::dec << "\",";
+                            jsonResponse << "\"suspendCount\":" << t.SuspendCount << ",";
+                            jsonResponse << "\"priority\":" << (int)t.Priority << ",";
+                            jsonResponse << "\"waitReason\":" << (int)t.WaitReason << ",";
+                            jsonResponse << "\"lastError\":" << t.LastError << ",";
+                            jsonResponse << "\"isCurrent\":" << (i == threadList.CurrentThread ? "true" : "false");
+                            jsonResponse << "}";
+                        }
+
+                        jsonResponse << "]}";
+
+                        // Free the list
+                        if (threadList.list) {
+                            BridgeFree(threadList.list);
+                        }
+
+                        sendHttpResponse(clientSocket, 200, "application/json", jsonResponse.str());
+                    }
+                }
                 // Memory Access Functions (Legacy endpoints for compatibility)
                 else if (path == "/MemRead") {
                     std::string addrStr = queryParams["addr"];
